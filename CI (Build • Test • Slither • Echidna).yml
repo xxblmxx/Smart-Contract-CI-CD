@@ -1,0 +1,83 @@
+name: CI (Build • Test • Slither • Echidna)
+
+on:
+  push:
+    branches: [ main, "feature/**" ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  security-events: write   # for SARIF upload
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    services:
+      ganache:
+        image: trufflesuite/ganache-cli:latest
+        ports: ["8545:8545"]
+        options: >-
+          --accounts 10 --defaultBalanceEther 100
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 18
+        cache: 'npm'
+
+    - name: Install deps
+      run: npm ci
+
+    - name: Compile
+      run: npx hardhat compile
+
+    - name: Unit tests
+      run: npx hardhat test --network localhost
+
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install Slither & solc
+      run: |
+        pip3 install slither-analyzer solc-select
+        solc-select install 0.8.18
+        solc-select use 0.8.18
+
+    - name: Slither (summary)
+      run: slither . --print human-summary
+
+    - name: Slither (SARIF)
+      run: slither . --sarif slither.sarif || true
+
+    - name: Upload SARIF
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: slither.sarif
+
+    - name: Install GHC/Cabal/Echidna
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ghc cabal-install
+        cabal update
+        cabal install echidna --installdir=$HOME/.cabal/bin
+        echo "$HOME/.cabal/bin" >> $GITHUB_PATH
+
+    - name: Echidna fuzz (demo-safe)
+      run: |
+        npx hardhat compile
+        echidna-test contracts --contract TimelockWallet --config echidna.yml || true
+
+    - name: Save build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: hardhat-artifacts
+        path: |
+          artifacts/
+          cache/
+          slither.sarif
