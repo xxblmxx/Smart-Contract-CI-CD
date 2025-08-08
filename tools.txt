@@ -1,22 +1,55 @@
-touch TOOLS.md
-# CI/CD Pipeline Tools
+Smart Contract CI/CD Pipeline Tools List
+🔧 1. Setup & Build
+actions/checkout@v3 — pull your repo
 
-## 1. Version Control
-- GitHub
-- Git
 
-## 2. Smart Contract Development
-- Hardhat
-- Foundry
-- Truffle
-- Solhint
+actions/setup-node@v3 — install Node.js v18
 
-## 3. Security & Vulnerability Scanning
-- Slither
-- MythX
-- CodeQL
 
-## 4. Deployment & Blockchain
-- Infura
-- Alchemy
-- Hardhat Deploy
+npm ci — install JS dependencies (Hardhat, OpenZeppelin, etc.)
+
+
+🕵️ Static Analysis
+Slither (via pip install slither-analyzer)
+
+
+(Optional) Mythril (bytecode scanner)
+
+
+🧪 Fuzz Testing
+Echidna (via cabal install echidna)
+
+
+✅ Unit Testing
+Ganache CLI (Docker service)
+
+
+Hardhat (npx hardhat test) + Mocha/Chai/Waffle
+
+
+📐 Formal Verification (optional)
+Certora Prover (Certora CLI)
+
+
+(Optional) KLEE or other SMT‐based tools
+
+
+🚀 Deployment
+Hardhat Deploy Scripts (npx hardhat run … --network)
+
+
+Infura/Alchemy RPC endpoints
+
+
+(Optional) Docker & docker-compose for staging
+
+
+Optional for our CI/CD
+📊 Monitoring & Self-Healing
+Prometheus (metrics collection)
+
+
+Grafana (dashboards + alert webhook)
+
+
+Argo Rollouts/CD (automated canary & rollback)
