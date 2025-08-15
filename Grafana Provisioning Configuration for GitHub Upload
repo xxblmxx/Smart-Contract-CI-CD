@@ -1,0 +1,69 @@
+Grafana Provisioning Configuration for GitHub Upload
+Below is the complete directory structure and file contents to add Grafana provisioning and dashboard definitions to your repository. Create these files in your smart-contracts-ci-cd repo.
+smart-contracts-ci-cd/
+├── grafana/
+│   ├── dashboards/
+│   │   └── ci_metrics.json
+│   └── provisioning/
+│       ├── dashboards/
+│       │   └── dashboards.yaml
+│       └── datasources/
+│           └── datasources.yaml
+└── ... (other folders)
+
+1. grafana/dashboards/ci_metrics.json
+{
+  "dashboard": {
+    "title": "Smart Contract CI Metrics",
+    "panels": [
+      {
+        "type": "graph",
+        "title": "Batch Test Durations",
+        "targets": [
+          { "expr": "test_duration_seconds{job=\"batch1\"}" },
+          { "expr": "test_duration_seconds{job=\"batch2\"}" },
+          { "expr": "test_duration_seconds{job=\"batch3\"}" },
+          { "expr": "test_duration_seconds{job=\"batch4\"}" },
+          { "expr": "test_duration_seconds{job=\"batch5\"}" },
+          { "expr": "test_duration_seconds{job=\"batch6\"}" },
+          { "expr": "test_duration_seconds{job=\"batch7\"}" }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 }
+      }
+    ]
+  }
+}
+
+2. grafana/provisioning/dashboards/dashboards.yaml
+apiVersion: 1
+providers:
+  - name: 'CI Metrics'
+    orgId: 1
+    folder: 'CI/CD'
+    type: file
+    disableDeletion: false
+    options:
+      path: /var/lib/grafana/dashboards
+
+3. grafana/provisioning/datasources/datasources.yaml
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+
+Deployment Instructions
+Kubernetes/Helm: Mount grafana/provisioning to /etc/grafana/provisioning and grafana/dashboards to /var/lib/grafana/dashboards in your Grafana container.
+
+
+Docker: Use:
+
+ docker run -d -p 3000:3000 \
+  -v $(pwd)/grafana/provisioning:/etc/grafana/provisioning \
+  -v $(pwd)/grafana/dashboards:/var/lib/grafana/dashboards \
+  grafana/grafana
+
+
+Once Grafana restarts, your "Smart Contract CI Metrics" dashboard will be automatically provisioned and ready to view. 🚀
