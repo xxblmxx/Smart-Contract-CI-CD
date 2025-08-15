@@ -1,0 +1,272 @@
+name: Smart Contracts — Full CI/CD (Build • Test • Slither • Echidna • Deploy • Obs • IPFS • AI)
+
+on:
+  push:
+    branches: [ main, "feature/**", "release/**" ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+# avoid overlapping runs per branch
+concurrency:
+  group: smart-pipeline-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write     # upload SARIF
+  pull-requests: write       # comment on PR (AI gas advice)
+
+jobs:
+  ci:
+    name: Build, Test, Slither, Echidna
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    # Node & deps
+    - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: 18
+        cache: npm
+
+    - name: Install NPM deps
+      run: npm ci
+
+    - name: Compile
+      run: npx hardhat compile
+
+    - name: Unit tests
+      run: npx hardhat test
+
+    # --- Static analysis: Slither (with SARIF upload) ---
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install Slither & solc
+      run: |
+        pip3 install slither-analyzer solc-select
+        solc-select install 0.8.18
+        solc-select use 0.8.18
+
+    - name: Slither (human summary)
+      run: slither . --print human-summary
+
+    - name: Slither (SARIF; non-blocking)
+      run: slither . --sarif slither.sarif || true
+
+    - name: Upload SARIF
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: slither.sarif
+
+    # --- Fuzzing: Echidna (demo-safe; remove `|| true` to gate builds) ---
+    - name: Install GHC/Cabal/Echidna
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ghc cabal-install
+        cabal update
+        cabal install echidna --installdir=$HOME/.cabal/bin
+        echo "$HOME/.cabal/bin" >> $GITHUB_PATH
+
+    - name: Echidna fuzz (does NOT fail build yet)
+      run: |
+        npx hardhat compile
+        echidna-test contracts --contract TimelockWallet --config echidna.yml || true
+
+    # --- Upload build artifacts for downstream jobs (IPFS etc.) ---
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: hardhat-artifacts
+        path: |
+          artifacts/
+          cache/
+          slither.sarif
+
+  deploy:
+    name: Deploy to Testnets (gated)
+    runs-on: ubuntu-latest
+    needs: [ci]
+    if: >
+      always() &&
+      needs.ci.result == 'success' &&
+      github.ref_name == 'main' || startsWith(github.ref_name, 'release/') &&
+      secrets.PRIVATE_KEY != '' &&
+      (secrets.SEPOLIA_URL != '' || secrets.GOERLI_URL != '' || secrets.MUMBAI_URL != '' || secrets.BSC_TESTNET_URL != '') &&
+      secrets.DEPLOY_RECIPIENT != ''
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 18
+        cache: npm
+
+    - run: npm ci
+
+    # Add/adjust networks to match your hardhat.config.js
+    - name: Deploy to Sepolia (if set)
+      if: ${{ secrets.SEPOLIA_URL }}
+      env:
+        SEPOLIA_URL: ${{ secrets.SEPOLIA_URL }}
+        PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+        RECIPIENT:   ${{ secrets.DEPLOY_RECIPIENT }}
+      run: npx hardhat run scripts/deploy.js --network sepolia
+
+    - name: Deploy to Goerli (if set)
+      if: ${{ secrets.GOERLI_URL }}
+      env:
+        GOERLI_URL: ${{ secrets.GOERLI_URL }}
+        PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+        RECIPIENT:   ${{ secrets.DEPLOY_RECIPIENT }}
+      run: npx hardhat run scripts/deploy.js --network goerli
+
+    - name: Deploy to Mumbai (if set)
+      if: ${{ secrets.MUMBAI_URL }}
+      env:
+        MUMBAI_URL: ${{ secrets.MUMBAI_URL }}
+        PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+        RECIPIENT:   ${{ secrets.DEPLOY_RECIPIENT }}
+      run: npx hardhat run scripts/deploy.js --network mumbai
+
+    - name: Deploy to BSC Testnet (if set)
+      if: ${{ secrets.BSC_TESTNET_URL }}
+      env:
+        BSC_TESTNET_URL: ${{ secrets.BSC_TESTNET_URL }}
+        PRIVATE_KEY:     ${{ secrets.PRIVATE_KEY }}
+        RECIPIENT:       ${{ secrets.DEPLOY_RECIPIENT }}
+      run: npx hardhat run scripts/deploy.js --network bsctest
+
+  observability:
+    name: Push Logs/Metrics (Grafana Loki / Prometheus)
+    runs-on: ubuntu-latest
+    needs: [ci]
+    # Run even if ci failed; only push if secrets present
+    if: ${{ always() && (secrets.GRAFANA_LOKI_URL != '' || secrets.PROM_PUSHGATEWAY_URL != '') }}
+
+    steps:
+    - name: Build log line
+      id: buildlog
+      run: |
+        echo "ts=$(date -u +%FT%TZ)" >> $GITHUB_OUTPUT
+        echo "status=${{ needs.ci.result }}" >> $GITHUB_OUTPUT
+        echo "run_id=${{ github.run_id }}" >> $GITHUB_OUTPUT
+
+    - name: Push log to Loki (optional)
+      if: ${{ secrets.GRAFANA_LOKI_URL }}
+      env:
+        LOKI_URL:   ${{ secrets.GRAFANA_LOKI_URL }}
+        LOKI_TOKEN: ${{ secrets.GRAFANA_LOKI_TOKEN }}
+      run: |
+        payload='[{"streams":[{"stream":{"job":"smart-contract-ci","repo":"${{ github.repository }}"},"values":[["'$(date +%s%N)'","status=${{ steps.buildlog.outputs.status }} run_id=${{ steps.buildlog.outputs.run_id }} ts=${{ steps.buildlog.outputs.ts }}"]]}]}]'
+        curl -s -H "Content-Type: application/json" -H "Authorization: Bearer ${LOKI_TOKEN}" -X POST "${LOKI_URL}/loki/api/v1/push" -d "${payload}" || true
+
+    - name: Push metric to Prometheus (optional)
+      if: ${{ secrets.PROM_PUSHGATEWAY_URL }}
+      env:
+        PGW: ${{ secrets.PROM_PUSHGATEWAY_URL }}
+      run: |
+        metric="# TYPE ci_status gauge\nci_status{repo=\"${{ github.repository }}\"} $([ '${{ needs.ci.result }}' = 'success' ] && echo 1 || echo 0)"
+        echo -e "$metric" | curl --data-binary @- "${PGW}/metrics/job/smart-contract-ci/repo/${{ github.repository_owner }}" || true
+
+  ipfs:
+    name: Pin Artifacts to IPFS (web3.storage)
+    runs-on: ubuntu-latest
+    needs: [ci]
+    if: ${{ needs.ci.result == 'success' && secrets.WEB3_STORAGE_TOKEN != '' }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Download artifacts from CI
+      uses: actions/download-artifact@v4
+      with:
+        name: hardhat-artifacts
+        path: ./ci-artifacts
+
+    - name: Pack & pin to IPFS
+      env:
+        WEB3_STORAGE_TOKEN: ${{ secrets.WEB3_STORAGE_TOKEN }}
+      run: |
+        npm i -g @web3-storage/w3cli
+        tar -czf artifacts.tar.gz ci-artifacts
+        w3 put artifacts.tar.gz --token $WEB3_STORAGE_TOKEN | tee ipfs_url.txt
+
+    - name: Upload IPFS pointer
+      uses: actions/upload-artifact@v4
+      with:
+        name: ipfs-pointer
+        path: ipfs_url.txt
+
+  ai_gas_advice:
+    name: AI/Heuristic Gas Suggestions (PR comments)
+    runs-on: ubuntu-latest
+    needs: [ci]
+    if: ${{ github.event_name == 'pull_request' }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 18
+        cache: npm
+    - run: npm ci
+
+    - name: Compile
+      run: npx hardhat compile
+
+    - name: Heuristic notes
+      run: |
+        node - <<'JS'
+        const fs = require('fs');
+        const glob = require('glob');
+        const files = glob.sync('contracts/**/*.sol');
+        let notes = [];
+        for (const f of files) {
+          const src = fs.readFileSync(f, 'utf8');
+          const regex = /function\s+([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*(public|external)(?![^{;\n]*\b(view|pure|payable|only|when|nonReentrant)\b)/gms;
+          const matches = [...src.matchAll(regex)];
+          if (matches.length) notes.push(`**${f}**: ${matches.length} function(s) could benefit from tighter visibility/modifiers/gas patterns.`);
+        }
+        fs.writeFileSync('gas-advice.md', notes.length ? notes.join('\\n') : 'No obvious gas suggestions found.');
+        JS
+
+    - name: Comment on PR
+      uses: thollander/actions-comment-pull-request@v2
+      with:
+        filePath: gas-advice.md
+
+  subgraph:
+    name: Subgraph Deploy (optional)
+    runs-on: ubuntu-latest
+    needs: [deploy]
+    if: ${{ needs.deploy.result == 'success' && secrets.GRAPH_ACCESS_TOKEN != '' }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install graph-cli
+      run: npm i -g @graphprotocol/graph-cli
+
+    - name: Auth & Deploy
+      env:
+        GRAPH_ACCESS_TOKEN: ${{ secrets.GRAPH_ACCESS_TOKEN }}
+      run: |
+        graph auth --product hosted-service $GRAPH_ACCESS_TOKEN
+        if [ -d "subgraph" ]; then
+          cd subgraph
+          npm ci || true
+          graph codegen
+          graph build
+          graph deploy --product hosted-service YOUR_GH_USER/YOUR_SUBGRAPH_NAME
+        else
+          echo "No subgraph/ folder present; skipping."
+        fi
